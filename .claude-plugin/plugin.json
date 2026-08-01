@@ -3,6 +3,6 @@
   "description": "Rappi food delivery plugin for Claude. Order food through conversation — search restaurants, browse menus, customize orders, checkout, and track deliveries. Remembers your favorites, preferences, and order history.",
   "version": "0.1.0",
   "author": { "name": "Gabriel Garavit" },
-  "repository": "https://github.com/garavitgabriel/rappi-claude-plugin",
+  "repository": "https://github.com/garavitgabriel/rappi-plugin-claude-openclaw",
   "license": "MIT"
 }
