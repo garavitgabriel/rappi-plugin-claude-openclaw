@@ -1,0 +1,13 @@
+{
+  "name": "garavitgabriel",
+  "owner": {
+    "name": "Gabriel Garavit"
+  },
+  "plugins": [
+    {
+      "name": "rappi",
+      "source": "./",
+      "description": "Order anything from Rappi through conversation — restaurants, groceries, pharmacies, liquor. Searches, browses menus, manages your cart, checks out, and tracks delivery. Learns your taste profile over time. Colombia + Mexico."
+    }
+  ]
+}
