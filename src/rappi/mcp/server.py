@@ -1642,7 +1642,7 @@ def main():
     if _transport in ("sse", "streamable-http", "http"):
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
-        from starlette.routing import Route, Mount
+        from starlette.routing import Route
         import uvicorn
 
         host = os.environ.get("MCP_HOST", "0.0.0.0")
@@ -1651,14 +1651,14 @@ def main():
         def health(_request):
             return PlainTextResponse("ok")
 
-        mcp_app = mcp.sse_app() if _transport == "sse" else mcp.streamable_http_app()
-
-        app = Starlette(
-            routes=[
-                Route("/health", health),
-                Mount("/", app=mcp_app),
-            ],
-        )
+        # Serve BOTH transports: streamable HTTP at /mcp (modern, what claude.ai
+        # prefers) and legacy SSE at /sse + /messages (existing connectors).
+        # The streamable app owns the lifespan (session manager), so it is the
+        # root app and the SSE + health routes are grafted onto its router.
+        app = mcp.streamable_http_app()
+        sse_app = mcp.sse_app()
+        app.router.routes.extend(sse_app.routes)
+        app.router.routes.append(Route("/health", health))
 
         print(f"[rappi-mcp] Starting {_transport} on {host}:{port}", flush=True)
         uvicorn.run(app, host=host, port=port)
