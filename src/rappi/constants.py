@@ -19,6 +19,8 @@ _country = COUNTRIES.get(_country_code, COUNTRIES["co"])
 RAPPI_DOMAIN = _country["domain"]
 _api_prefix = _country["api_prefix"]
 BASE_URL = f"https://services.{_api_prefix}grability.rappi.com" if _api_prefix else "https://services.grability.rappi.com"
+# The order-history endpoint lives on the v2 gateway host, not the services host.
+V2_BASE_URL = f"https://v2.{_api_prefix}grability.rappi.com" if _api_prefix else "https://v2.grability.rappi.com"
 
 # Default coordinates (0,0 — auto-synced from active address at runtime)
 DEFAULT_LAT = 0.0
@@ -117,6 +119,7 @@ class Endpoints:
     # Orders
     GET_ORDERS = "/api/user-order-home/orders"
     ACTIVE_ORDERS_V3 = "/api/user-order-home/v3/orders"
+    ORDER_HISTORY = "/api/orders/history-user"  # completed-order history (paginated); on V2_BASE_URL
     ORDER_RESUME = "/order-resume/fully/{order_id}"
     ORDER_REALTIME_STATE = "/api/ms/user-order-state/auth/{order_id}"
     ORDER_PRODUCTS = "/api/support-order-cost/orders/{order_id}/products"

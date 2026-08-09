@@ -21,6 +21,7 @@ from rappi.services.order import get_orders as _get_orders
 from rappi.services.order import get_order_resume as _get_order_resume
 from rappi.services.order import get_order_realtime_state as _get_order_realtime_state
 from rappi.services.order import get_order_cost_breakdown as _get_order_cost_breakdown
+from rappi.services.order import fetch_order_history as _fetch_order_history
 from rappi.services.search import search as _search
 from rappi.services.search import search_cpg_products as _search_cpg_products
 from rappi.services.home import get_home_verticals as _get_home_verticals
@@ -1124,29 +1125,131 @@ async def get_order_status() -> dict:
 
 
 @mcp.tool()
-async def get_order_history(limit: int = 10) -> dict:
-    """Get past orders with store names, items, totals, and dates from local memory.
+async def get_order_history(
+    limit: int = 10,
+    refresh: bool = True,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict:
+    """Get past completed orders — store, total, date, items — from the Rappi API.
 
-    When to use: User asks "what did I order last time?" or "show my order history".
-    Next step: Use quick_reorder to re-add items from a past order.
+    Pulls real order history from Rappi's account/orders endpoint (paginated,
+    newest first) and caches each order into local memory. Falls back to the
+    local cache if the API is unavailable.
+
+    When to use: User asks "what did I order last time?", "show my order history",
+    or wants to analyze past spending.
+    Next step: Use quick_reorder to re-add items, or get_spending_summary to
+    break spend down by store type.
+
+    Args:
+        limit: Max orders to return (ignored when since/until are set — those
+            return the full matching window).
+        refresh: If True, fetch fresh from the API; if False, read local cache only.
+        since: Only include orders on/after this ISO date (YYYY-MM-DD).
+        until: Only include orders before this ISO date (YYYY-MM-DD).
     """
     async with MemoryManager() as memory:
-        orders = await memory.orders.list_recent(limit=limit)
-        return {
-            "orders": [
-                {
-                    "id": o.id,
-                    "store": o.store_name,
-                    "store_type": o.store_type,
-                    "total": o.total,
-                    "tip": o.tip,
-                    "state": o.state,
-                    "date": o.placed_at,
-                    "items": o.items or [],
-                }
-                for o in orders
-            ]
-        }
+        if refresh:
+            try:
+                async with _client_synced() as client:
+                    fetched = await _fetch_order_history(
+                        client, since=since, until=until,
+                        max_pages=200 if (since or until) else 20,
+                    )
+                # Cache into local memory so offline/cache reads stay warm.
+                for o in fetched:
+                    try:
+                        await memory.orders.save(
+                            order_id=o["id"],
+                            store_id=o.get("store_id") or 0,
+                            store_name=o.get("store_name"),
+                            store_type=o.get("store_type"),
+                            total=o.get("total") or 0.0,
+                            tip=0.0,
+                            state=o.get("state"),
+                            placed_at=o.get("created_at") or "",
+                        )
+                    except Exception:
+                        pass
+                orders = fetched if (since or until) else fetched[:limit]
+                return {"orders": orders, "count": len(orders), "source": "api"}
+            except Exception as e:
+                # Fall through to local cache on any API/auth error.
+                api_error = str(e)
+            else:
+                api_error = None
+        else:
+            api_error = None
+
+        # Local-cache path (refresh=False, or API failed).
+        records = await memory.orders.list_recent(limit=limit if not (since or until) else 1000)
+        orders = []
+        for o in records:
+            created = (o.placed_at or "")[:10]
+            if since and created and created < since:
+                continue
+            if until and created and created >= until:
+                continue
+            orders.append({
+                "id": o.id,
+                "store_name": o.store_name,
+                "store_type": o.store_type,
+                "total": o.total,
+                "tip": o.tip,
+                "state": o.state,
+                "created_at": o.placed_at,
+                "product_names": [i.get("name") for i in (o.items or [])],
+            })
+        result = {"orders": orders, "count": len(orders), "source": "cache"}
+        if api_error:
+            result["api_error"] = api_error
+        return result
+
+
+@mcp.tool()
+async def get_spending_summary(since: str | None = None, until: str | None = None) -> dict:
+    """Summarize Rappi spending by store type over a date window.
+
+    Pulls completed order history from the API and aggregates totals and order
+    counts per store_type (restaurant, turbo, market, pharmacy, etc.), plus a
+    grand total. Amounts are in the account's local currency (COP for Colombia).
+
+    When to use: User asks "how much am I spending on Rappi?", "where does my
+    Rappi money go?", "break down my delivery spend", or wants a spending report.
+
+    Args:
+        since: Only include orders on/after this ISO date (YYYY-MM-DD).
+        until: Only include orders before this ISO date (YYYY-MM-DD).
+    """
+    async with _client_synced() as client:
+        orders = await _fetch_order_history(
+            client, since=since, until=until, max_pages=200
+        )
+
+    by_type: dict[str, dict] = {}
+    grand_total = 0.0
+    for o in orders:
+        stype = o.get("store_type") or "unknown"
+        bucket = by_type.setdefault(stype, {"store_type": stype, "orders": 0, "total": 0.0})
+        bucket["orders"] += 1
+        bucket["total"] += o.get("total") or 0.0
+        grand_total += o.get("total") or 0.0
+
+    breakdown = sorted(by_type.values(), key=lambda b: b["total"], reverse=True)
+    for b in breakdown:
+        b["total"] = round(b["total"], 2)
+        b["pct"] = round(100 * b["total"] / grand_total, 1) if grand_total else 0.0
+        b["avg_ticket"] = round(b["total"] / b["orders"], 2) if b["orders"] else 0.0
+
+    return {
+        "since": since,
+        "until": until,
+        "order_count": len(orders),
+        "grand_total": round(grand_total, 2),
+        "avg_ticket": round(grand_total / len(orders), 2) if orders else 0.0,
+        "by_store_type": breakdown,
+    }
 
 
 @mcp.tool()
@@ -1640,7 +1743,6 @@ async def get_active_orders() -> dict:
 
 def main():
     if _transport in ("sse", "streamable-http", "http"):
-        from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
         import uvicorn
