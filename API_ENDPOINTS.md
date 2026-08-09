@@ -22,7 +22,8 @@ Captured from browser DevTools on rappi.com.co (April 2026).
 | `/api/ms/shopping-cart/v1/{store_type}/checkout/detail` | GET | checkout |
 | `/api/ms/shopping-cart/v1/{store_type}/tip` | PUT | checkout |
 | `/api/ms/shopping-cart-proxy/{store_type}/checkout` | POST | place_order |
-| `/api/user-order-home/orders` | GET | get_order_history |
+| `/api/user-order-home/orders` | GET | get_order_status (active + cancelled) |
+| `https://v2.grability.rappi.com/api/orders/history-user?page=N` | GET | get_order_history, get_spending_summary — **completed-order history**, paginated newest-first, on the **v2** gateway host (not `services`); 429-rate-limits rapid paging |
 
 ## Not Yet Implemented
 

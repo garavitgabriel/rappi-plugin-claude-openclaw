@@ -48,7 +48,7 @@ Claude: *searches both stores in parallel*
         *shows combined checkout with delivery fees*
 ```
 
-The plugin gives your AI assistant **40 tools** across all Rappi store types, **4 workflow skills**, a specialized ordering agent, and a local memory system that builds a taste profile from your order history.
+The plugin gives your AI assistant **41 tools** across all Rappi store types, **4 workflow skills**, a specialized ordering agent, and a local memory system that builds a taste profile from your order history.
 
 ## Store Types
 
@@ -211,7 +211,7 @@ uv run rappi prefs set embeddings.enabled true
 ## MCP Tools Reference
 
 <details>
-<summary>All 40 tools</summary>
+<summary>All 41 tools</summary>
 
 **Discovery & Browsing**
 - `explore_verticals` — all available store types in area (Restaurants, Turbo, Markets, Farmacia, Licores)
@@ -242,7 +242,8 @@ uv run rappi prefs set embeddings.enabled true
 - `get_order_detail(order_id)` — full order summary
 - `get_order_breakdown(order_id)` — detailed costs, fees, discounts
 - `get_order_status` — active and cancelled orders
-- `get_order_history(limit)` — past orders with items
+- `get_order_history(limit, refresh?, since?, until?)` — completed orders pulled live from the Rappi API (paginated, newest-first), cached to local memory; supports `since`/`until` ISO date filters
+- `get_spending_summary(since?, until?)` — total spend and order count broken down by store type over a date window
 
 **Account**
 - `get_ordering_context` — full state snapshot (user, address, cart, memory)
