@@ -1775,6 +1775,20 @@ async def keepalive_tick() -> str:
         return f"error: {type(e).__name__}"
 
 
+MISSING_VOLUME_WARNING = (
+    "[rappi-mcp] WARNING: RAPPI_REFRESH_TOKEN set without RAPPI_CONFIG_DIR — refreshed tokens "
+    "will be lost on restart; mount a volume (README § Auth runbook)"
+)
+
+
+def warn_if_no_config_volume() -> bool:
+    """Warn (never refuse) when refreshed tokens would live only in the container's ~/.rappi."""
+    if os.environ.get("RAPPI_REFRESH_TOKEN") and not os.environ.get("RAPPI_CONFIG_DIR"):
+        print(MISSING_VOLUME_WARNING, file=sys.stderr, flush=True)
+        return True
+    return False
+
+
 async def _keepalive_loop(interval: float = KEEPALIVE_INTERVAL_S) -> None:
     while True:
         print(f"[rappi-mcp] token keepalive: {await keepalive_tick()}", file=sys.stderr, flush=True)
@@ -1803,6 +1817,7 @@ def build_http_app():
 
     @asynccontextmanager
     async def lifespan(starlette_app):
+        warn_if_no_config_volume()
         task = asyncio.create_task(_keepalive_loop())
         try:
             async with session_lifespan(starlette_app) as state:

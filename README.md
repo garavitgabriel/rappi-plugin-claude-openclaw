@@ -355,6 +355,10 @@ Coordinates are auto-synced from your Rappi active address — no need to set la
 3. Locally, in `~/Projects/"Rappi Claude Plugin"`, run `uv run rappi auth login` (phone + OTP), then `uv run rappi auth push-railway`. The second command needs the Railway CLI linked to this project.
 4. Confirm that the MCP `auth_status` tool shows `auto_refresh: true` and a `token_expires_at` about 7 days out.
 
+After push-railway, Railway owns the session. If Rappi rotates refresh tokens, the server's first refresh cancels the laptop's copy, so run `uv run rappi auth login` again locally if you need the CLI.
+
+If `RAPPI_REFRESH_TOKEN` is set without `RAPPI_CONFIG_DIR`, the server logs a startup `WARNING`: refreshed tokens would be lost on every restart, so mount the volume (steps 1–2).
+
 **When a tool still says "Token expired…"**, the refresh itself failed. Re-run step 3 (`uv run rappi auth login`, then `uv run rappi auth push-railway`). Locally, `uv run rappi auth refresh` shows the refresh error code, and `uv run rappi auth status` shows `Expires` and `Auto-refresh`.
 
 **What still needs a human:** the refresh token eventually expires too. Its lifetime is unknown, likely at least 3 months. Rappi can also revoke it at any time, for example after a password change, a logout on all devices, or a security reset. When that happens, repeat step 3.

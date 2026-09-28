@@ -557,6 +557,44 @@ class TestKeepalive:
         assert {"/mcp", "/sse", "/health"} <= paths
 
 
+    def test_missing_volume_warns_only_when_refresh_seed_without_config_dir(self, monkeypatch, capsys):
+        from rappi.mcp import server
+
+        # Refresh seed + no persistent config dir → one loud stderr line, no secrets
+        monkeypatch.setenv("RAPPI_REFRESH_TOKEN", REFRESH_1)
+        monkeypatch.delenv("RAPPI_CONFIG_DIR")
+        assert server.warn_if_no_config_volume() is True
+        err = capsys.readouterr().err
+        assert err.strip() == server.MISSING_VOLUME_WARNING
+        assert REFRESH_1 not in err
+
+        # Volume configured → silent
+        monkeypatch.setenv("RAPPI_CONFIG_DIR", "/data/rappi")
+        assert server.warn_if_no_config_volume() is False
+        # Legacy token-only seed → silent
+        monkeypatch.delenv("RAPPI_REFRESH_TOKEN")
+        monkeypatch.delenv("RAPPI_CONFIG_DIR")
+        monkeypatch.setenv("RAPPI_TOKEN", ACCESS_1)
+        assert server.warn_if_no_config_volume() is False
+        assert capsys.readouterr().err == ""
+
+    def test_http_lifespan_emits_missing_volume_warning(self, monkeypatch, capsys):
+        from starlette.testclient import TestClient
+
+        from rappi.mcp import server
+
+        async def idle_loop(*_args, **_kwargs):
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(server, "_keepalive_loop", idle_loop)
+        monkeypatch.setattr(server.mcp, "_session_manager", None, raising=False)
+        monkeypatch.setenv("RAPPI_REFRESH_TOKEN", REFRESH_1)
+        monkeypatch.delenv("RAPPI_CONFIG_DIR")
+        with TestClient(server.build_http_app()) as client:
+            assert client.get("/health").text == "ok"
+        assert server.MISSING_VOLUME_WARNING in capsys.readouterr().err
+
+
 class TestAuthStatusTool:
     async def test_auth_status_reports_expiry_and_auto_refresh(self, cm, httpx_mock, monkeypatch):
         from rappi.mcp import server
