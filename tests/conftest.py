@@ -12,6 +12,21 @@ from rappi.config import ConfigManager, RappiConfig
 
 
 # ---------------------------------------------------------------------------
+# Isolation: never touch the real ~/.rappi or inherit real RAPPI_* env vars
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_rappi_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    config_dir = tmp_path / "rappi-home"
+    monkeypatch.setenv("RAPPI_CONFIG_DIR", str(config_dir))
+    for var in ("RAPPI_TOKEN", "RAPPI_REFRESH_TOKEN", "RAPPI_DEVICE_ID", "RAPPI_LAT", "RAPPI_LNG"):
+        monkeypatch.delenv(var, raising=False)
+    # ConfigManager.load() writes RAPPI_COUNTRY into os.environ; setenv restores it afterwards.
+    monkeypatch.setenv("RAPPI_COUNTRY", "co")
+    return config_dir
+
+
+# ---------------------------------------------------------------------------
 # Config fixtures
 # ---------------------------------------------------------------------------
 

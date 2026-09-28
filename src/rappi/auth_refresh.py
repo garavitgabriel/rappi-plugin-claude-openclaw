@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import weakref
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -112,12 +113,15 @@ async def _file_lock(config_dir: Path) -> AsyncIterator[None]:
         yield
         return
     config_dir.mkdir(parents=True, exist_ok=True)
-    with open(config_dir / LOCK_FILE_NAME, "a") as lock_file:
-        await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX)
+    fd = await asyncio.to_thread(os.open, config_dir / LOCK_FILE_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _refresh_headers(device_id: str) -> dict[str, str]:
