@@ -1,24 +1,34 @@
 """CLI commands for authentication."""
 
 import asyncio
+import subprocess
+from pathlib import Path
 
+import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.table import Table
 
-from rappi.client import RappiClient, TokenExpiredError
+from rappi.auth_refresh import RefreshFailedError, refresh_tokens
+from rappi.client import TOKEN_EXPIRED_MESSAGE, RappiClient, TokenExpiredError
 from rappi.config import ConfigManager
 from rappi.services.auth import get_profile, is_prime, set_token
 
 app = typer.Typer()
 console = Console()
 
+# src/rappi/cli/auth.py -> repo root (where the Railway project is linked)
+REPO_DIR = Path(__file__).resolve().parents[3]
+
 
 @app.command()
 def login(
     token: str | None = typer.Option(None, "--token", "-t", help="Manual Bearer token (skips browser login)"),
+    refresh_token: str | None = typer.Option(
+        None, "--refresh-token", help="Refresh token to pair with --token (enables auto-refresh)"
+    ),
     device_id: str | None = typer.Option(None, "--device-id", "-d", help="Device ID (UUID). Auto-generated if omitted."),
     country: str = typer.Option("co", "--country", "-c", help="Country code: co (Colombia), mx (Mexico)"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
@@ -38,7 +48,7 @@ def login(
         # Manual token flow
         if not token.startswith("ft."):
             console.print("[yellow]Warning:[/yellow] Token doesn't start with 'ft.' — this may not work.")
-        set_token(config_manager, token, device_id)
+        set_token(config_manager, token, device_id, refresh_token=refresh_token)
     else:
         # Browser login flow
         from rappi.services.browser_auth import login_with_browser
@@ -67,7 +77,13 @@ def login(
             console.print("Or use manual token: [bold]rappi auth login --token <your-token>[/bold]")
             raise typer.Exit(1)
 
-        set_token(config_manager, creds.token, creds.device_id)
+        set_token(
+            config_manager,
+            creds.token,
+            creds.device_id,
+            refresh_token=creds.refresh_token,
+            expires_in=creds.expires_in,
+        )
 
     # Verify the token works
     async def _verify():
@@ -79,7 +95,8 @@ def login(
         console.print(Panel(
             f"[green]Logged in as [bold]{profile.name}[/bold][/green]\n"
             f"Email: {profile.email}\n"
-            f"Phone: {profile.country_code} {profile.phone}",
+            f"Phone: {profile.country_code} {profile.phone}\n"
+            f"Auto-refresh: {'yes' if config_manager.load().refresh_token else 'no'}",
             title="Authentication Successful",
         ))
     except TokenExpiredError:
@@ -96,12 +113,12 @@ def status() -> None:
     config_manager = ConfigManager()
     config = config_manager.load()
 
-    if not config.token:
+    if not config.token and not config.refresh_token:
         console.print("[red]Not authenticated.[/red] Run: [bold]rappi auth login[/bold]")
         raise typer.Exit(1)
 
     async def _fetch():
-        async with RappiClient(config=config) as client:
+        async with RappiClient(config=config, config_manager=config_manager) as client:
             profile = await get_profile(client)
             prime = await is_prime(client)
             return profile, prime
@@ -109,7 +126,7 @@ def status() -> None:
     try:
         profile, prime = asyncio.run(_fetch())
     except TokenExpiredError:
-        console.print("[red]Token expired.[/red] Run: [bold]rappi auth login[/bold]")
+        console.print(f"[red]{TOKEN_EXPIRED_MESSAGE}[/red]")
         raise typer.Exit(1)
 
     table = Table(title="Rappi Profile", show_header=False, box=None, padding=(0, 2))
@@ -123,6 +140,8 @@ def status() -> None:
     if profile.loyalty:
         table.add_row("Loyalty", f"{profile.loyalty.name} ({profile.loyalty.type})")
     table.add_row("Prime", "[green]Yes[/green]" if prime.is_prime else "No")
+    table.add_row("Expires", config.token_expires_at or "unknown")
+    table.add_row("Auto-refresh", "yes" if config.refresh_token else "no")
 
     console.print(table)
 
@@ -148,7 +167,10 @@ def token(
         console.print("[yellow]Warning:[/yellow] Token doesn't start with 'ft.' — this may not work.")
 
     config_manager = ConfigManager()
-    config_manager.update(token=bearer_token, device_id=device_id, country=country)
+    # A manually pasted token has no known refresh token or expiry.
+    config_manager.update(
+        token=bearer_token, device_id=device_id, country=country, refresh_token=None, token_expires_at=None
+    )
 
     # Verify
     async def _verify():
@@ -175,5 +197,53 @@ def token(
 def logout() -> None:
     """Clear saved authentication token."""
     config_manager = ConfigManager()
-    config_manager.update(token=None)
+    config_manager.update(token=None, refresh_token=None, token_expires_at=None)
     console.print("[green]Token cleared.[/green]")
+
+
+@app.command()
+def refresh() -> None:
+    """Force one token refresh. Prints only 'ok, expires <iso>' or the error code."""
+    config_manager = ConfigManager()
+    try:
+        config = asyncio.run(refresh_tokens(config_manager))
+    except RefreshFailedError as e:
+        console.print(f"refresh failed: {e.error_code or 'unknown'} (HTTP {e.status_code})", markup=False)
+        raise typer.Exit(1)
+    except httpx.HTTPError as e:
+        console.print(f"refresh failed: {type(e).__name__}", markup=False)
+        raise typer.Exit(1)
+    console.print(f"ok, expires {config.token_expires_at}", markup=False)
+
+
+@app.command("push-railway")
+def push_railway() -> None:
+    """Push the saved token set to the linked Railway service (values are never printed)."""
+    config = ConfigManager().load()
+    if not config.token or not config.refresh_token:
+        console.print(
+            "[red]No refresh token saved — refusing to push a token that can't auto-refresh.[/red]\n"
+            "Log in again first: [bold]uv run rappi auth login[/bold]"
+        )
+        raise typer.Exit(1)
+
+    argv = [
+        "railway", "variables",
+        "--set", f"RAPPI_TOKEN={config.token}",
+        "--set", f"RAPPI_REFRESH_TOKEN={config.refresh_token}",
+        "--set", f"RAPPI_DEVICE_ID={config.device_id}",
+    ]
+    try:
+        result = subprocess.run(argv, shell=False, capture_output=True, cwd=REPO_DIR, check=False)
+    except FileNotFoundError:
+        console.print("[red]Railway CLI not found.[/red] Install it and run [bold]railway link[/bold] in the repo.")
+        raise typer.Exit(1)
+
+    if result.returncode != 0:
+        # stderr is deliberately not echoed: it could quote the command line.
+        console.print(
+            f"[red]Railway push failed (exit {result.returncode}).[/red] "
+            "Check [bold]railway status[/bold] in the repo directory."
+        )
+        raise typer.Exit(1)
+    console.print("[green]Pushed RAPPI_TOKEN, RAPPI_REFRESH_TOKEN and RAPPI_DEVICE_ID to Railway.[/green]")

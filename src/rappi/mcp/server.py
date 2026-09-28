@@ -1,9 +1,14 @@
 """Rappi MCP server — exposes Rappi services as tools for AI assistants."""
 
+import asyncio
+import logging
 import os
-from contextlib import asynccontextmanager
+import sys
+from contextlib import asynccontextmanager, suppress
 
+from rappi.auth_refresh import RefreshFailedError, needs_proactive_refresh, refresh_tokens
 from rappi.client import RappiClient
+from rappi.config import ConfigManager
 from rappi.memory import MemoryManager
 from rappi.models.store import Product, StoreDetail, ToppingCategory
 from rappi.services.address import list_addresses as _list_addresses
@@ -52,7 +57,9 @@ _mcp_kwargs: dict = dict(
         "Then: search_restaurants or browse_restaurants -> get_restaurant_menu -> "
         "get_product_toppings (if has_toppings=true) -> add_to_cart -> "
         "checkout(confirm=false) to preview -> checkout(confirm=true) to place.\n\n"
-        "The user must authenticate first via `rappi auth login` in their terminal."
+        "The user must authenticate first via `rappi auth login` in their terminal. "
+        "Tokens auto-refresh; if a tool still reports the token expired, the user must run "
+        "`uv run rappi auth login` then `uv run rappi auth push-railway` (README § Auth runbook)."
     ),
 )
 
@@ -139,7 +146,7 @@ Order states: created → in_store → on_the_way → delivered
 All prices are in COP (Colombian Pesos). Format with dots: $35.500 (not commas).
 
 ## Error Recovery
-- Token expired → tell user to run `rappi auth login`
+- Token expired (auto-refresh failed) → tell user to run `uv run rappi auth login`, then `uv run rappi auth push-railway` for the hosted server
 - Store unavailable → suggest alternatives
 - Missing toppings → show which categories need selection
 - Product out of stock → suggest similar items from menu
@@ -296,7 +303,7 @@ If `has_toppings=true`: call `get_product_toppings` BEFORE adding to cart. Categ
 Call `track_order(order_id)` for real-time ETA and state.
 
 ## Error Handling
-- "Token expired" → tell user to run `rappi auth login`
+- "Token expired" (auto-refresh failed) → tell user to run `uv run rappi auth login`, then `uv run rappi auth push-railway` for the hosted server
 - "Store unavailable" → suggest alternatives
 - "Missing required toppings" → go back and ask
 - "Product not found" (Turbo/markets) → pass product_name and product_price
@@ -556,6 +563,8 @@ async def auth_status() -> dict:
             "name": profile.name,
             "email": profile.email,
             "is_prime": prime.is_prime,
+            "token_expires_at": client.config.token_expires_at,
+            "auto_refresh": bool(client.config.refresh_token),
         }
 
 
@@ -1741,26 +1750,94 @@ async def get_active_orders() -> dict:
         }
 
 
+# --- Token keep-alive (HTTP transports only) ---
+
+KEEPALIVE_INTERVAL_S = 6 * 60 * 60
+_logger = logging.getLogger("rappi.mcp")
+
+
+async def keepalive_tick() -> str:
+    """Refresh the Rappi token if it is due. Never raises; returns a log-safe summary."""
+    try:
+        config_manager = ConfigManager()
+        config = config_manager.load()
+        if not config.refresh_token:
+            return "skipped: no refresh token"
+        if not needs_proactive_refresh(config):
+            return f"not due, expires {config.token_expires_at}"
+        fresh = await refresh_tokens(config_manager, failed_token=config.token)
+        return f"refreshed, expires {fresh.token_expires_at}"
+    except RefreshFailedError as e:
+        _logger.warning("keepalive refresh failed: %s", e)
+        return f"error: {e}"
+    except Exception as e:  # noqa: BLE001 — the keep-alive must never crash the server
+        _logger.warning("keepalive failed: %s", type(e).__name__)
+        return f"error: {type(e).__name__}"
+
+
+MISSING_VOLUME_WARNING = (
+    "[rappi-mcp] WARNING: RAPPI_REFRESH_TOKEN set without RAPPI_CONFIG_DIR — refreshed tokens "
+    "will be lost on restart; mount a volume (README § Auth runbook)"
+)
+
+
+def warn_if_no_config_volume() -> bool:
+    """Warn (never refuse) when refreshed tokens would live only in the container's ~/.rappi."""
+    if os.environ.get("RAPPI_REFRESH_TOKEN") and not os.environ.get("RAPPI_CONFIG_DIR"):
+        print(MISSING_VOLUME_WARNING, file=sys.stderr, flush=True)
+        return True
+    return False
+
+
+async def _keepalive_loop(interval: float = KEEPALIVE_INTERVAL_S) -> None:
+    while True:
+        print(f"[rappi-mcp] token keepalive: {await keepalive_tick()}", file=sys.stderr, flush=True)
+        await asyncio.sleep(interval)
+
+
+def build_http_app():
+    """Starlette app serving streamable HTTP (/mcp), legacy SSE (/sse), /health, and the token keep-alive."""
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    def health(_request):
+        return PlainTextResponse("ok")
+
+    # Serve BOTH transports: streamable HTTP at /mcp (modern, what claude.ai
+    # prefers) and legacy SSE at /sse + /messages (existing connectors).
+    # The streamable app owns the lifespan (session manager), so it is the
+    # root app and the SSE + health routes are grafted onto its router.
+    app = mcp.streamable_http_app()
+    sse_app = mcp.sse_app()
+    app.router.routes.extend(sse_app.routes)
+    app.router.routes.append(Route("/health", health))
+
+    # Wrap (not replace) the session-manager lifespan to run the keep-alive beside it.
+    session_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(starlette_app):
+        warn_if_no_config_volume()
+        task = asyncio.create_task(_keepalive_loop())
+        try:
+            async with session_lifespan(starlette_app) as state:
+                yield state
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app.router.lifespan_context = lifespan
+    return app
+
+
 def main():
     if _transport in ("sse", "streamable-http", "http"):
-        from starlette.responses import PlainTextResponse
-        from starlette.routing import Route
         import uvicorn
 
         host = os.environ.get("MCP_HOST", "0.0.0.0")
         port = int(os.environ.get("PORT", os.environ.get("MCP_PORT", "8000")))
-
-        def health(_request):
-            return PlainTextResponse("ok")
-
-        # Serve BOTH transports: streamable HTTP at /mcp (modern, what claude.ai
-        # prefers) and legacy SSE at /sse + /messages (existing connectors).
-        # The streamable app owns the lifespan (session manager), so it is the
-        # root app and the SSE + health routes are grafted onto its router.
-        app = mcp.streamable_http_app()
-        sse_app = mcp.sse_app()
-        app.router.routes.extend(sse_app.routes)
-        app.router.routes.append(Route("/health", health))
+        app = build_http_app()
 
         print(f"[rappi-mcp] Starting {_transport} on {host}:{port}", flush=True)
         uvicorn.run(app, host=host, port=port)
