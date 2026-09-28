@@ -63,11 +63,16 @@ def parse_login_response(url: str, status: int, body: Any) -> LoginTokens | None
 async def login_with_browser(
     headless: bool = False,
     on_status: callable | None = None,
+    channel: str | None = "chrome",
 ) -> CapturedCredentials:
     """Launch a browser for the user to log in, intercept the auth token.
 
     Args:
         headless: If True, run in headless mode (mainly for testing).
+        channel: Playwright browser channel. Defaults to the installed Google
+            Chrome with its own user agent — Rappi's login rejects Playwright's
+            bundled "Chrome for Testing" plus a spoofed UA ("Algo ha salido mal").
+            None uses the bundled build with the legacy mobile UA.
         on_status: Optional callback(message: str) for progress updates.
 
     Returns:
@@ -97,11 +102,16 @@ async def login_with_browser(
 
     async with async_playwright() as pw:
         _status("Launching browser...")
-        browser = await pw.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            viewport={"width": 420, "height": 800},
-            user_agent=USER_AGENT,
+        browser = await pw.chromium.launch(
+            headless=headless,
+            channel=channel,
+            # Hide navigator.webdriver — Rappi's anti-bot check trips on it
+            args=["--disable-blink-features=AutomationControlled"],
         )
+        context_opts: dict[str, Any] = {"viewport": {"width": 420, "height": 800}}
+        if channel is None:
+            context_opts["user_agent"] = USER_AGENT
+        context = await browser.new_context(**context_opts)
         page = await context.new_page()
 
         async def _on_response(response):

@@ -32,6 +32,9 @@ def login(
     device_id: str | None = typer.Option(None, "--device-id", "-d", help="Device ID (UUID). Auto-generated if omitted."),
     country: str = typer.Option("co", "--country", "-c", help="Country code: co (Colombia), mx (Mexico)"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
+    browser: str = typer.Option(
+        "chrome", "--browser", help="Login browser: chrome (installed Google Chrome) or bundled (Playwright's Chrome for Testing)"
+    ),
 ) -> None:
     """Log in to Rappi. Opens a browser for you to sign in (or pass --token for manual auth)."""
     import os
@@ -67,7 +70,8 @@ def login(
         ))
 
         try:
-            creds = asyncio.run(login_with_browser(headless=headless, on_status=on_status))
+            channel = None if browser == "bundled" else browser
+            creds = asyncio.run(login_with_browser(headless=headless, on_status=on_status, channel=channel))
         except TimeoutError:
             console.print("[red]Login timed out. Please try again.[/red]")
             raise typer.Exit(1)
