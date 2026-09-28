@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -208,6 +209,9 @@ def refresh() -> None:
         config = asyncio.run(refresh_tokens(config_manager))
     except RefreshFailedError as e:
         console.print(f"refresh failed: {e.error_code or 'unknown'} (HTTP {e.status_code})", markup=False)
+        raise typer.Exit(1)
+    except httpx.HTTPError as e:
+        console.print(f"refresh failed: {type(e).__name__}", markup=False)
         raise typer.Exit(1)
     console.print(f"ok, expires {config.token_expires_at}", markup=False)
 

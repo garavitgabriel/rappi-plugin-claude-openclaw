@@ -689,6 +689,16 @@ class TestNoTokenLeaks:
         assert "fake-" not in everything  # no partial token fragments either
 
 
+def test_cli_refresh_network_error_prints_error_type_only(cm, httpx_mock):
+    import httpx
+
+    _seed(cm)
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"), method="POST", url=REFRESH_URL)
+    result = CliRunner().invoke(auth_app, ["refresh"])
+    assert result.exit_code == 1
+    assert result.output.strip() == "refresh failed: ConnectError"
+
+
 def test_expires_at_from_defaults_to_seven_days():
     now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
     assert expires_at_from(None, now=now) == "2026-10-05T12:00:00+00:00"
