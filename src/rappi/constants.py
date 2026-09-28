@@ -86,6 +86,7 @@ HEADERS_FAVORITES = {
 class Endpoints:
     # Auth / User
     USER_PROFILE = "/ms/application-user/auth"
+    REFRESH_TOKEN = "/api/rocket/refresh-token"  # POST {"refresh_token": ...} -> new access token
     IS_PRIME = "/api/ms/rappi-prime/is-prime"
 
     # Address
