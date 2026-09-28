@@ -1743,6 +1743,7 @@ async def get_active_orders() -> dict:
                     "state": o.get("state", o.get("status")),
                     "total": o.get("total", o.get("total_value")),
                     "eta": o.get("eta", o.get("estimated_time")),
+                    "status_text": o.get("status_text"),
                 }
                 for o in orders[:10]
                 if isinstance(o, dict)

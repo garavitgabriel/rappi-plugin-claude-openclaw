@@ -48,7 +48,7 @@ class Order(BaseModel):
     total: float = 0
     state: str | None = None
     place_at: str | None = None
-    eta: str | None = None
+    eta: str | int | None = None  # API sends minutes as an int on live orders
     store: OrderStore | None = None
     delivery_method: str | None = None
     tip: float = 0
