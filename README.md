@@ -93,7 +93,9 @@ uv run rappi auth token <RAPPI_TOKEN> <DEVICE_ID>
 uv run rappi auth token <RAPPI_TOKEN> <DEVICE_ID> --country mx
 ```
 
-Your token is saved locally at `~/.rappi/config.json`. It never leaves your machine.
+Your token is saved locally at `~/.rappi/config.json` (mode `0600`; override the directory with `RAPPI_CONFIG_DIR`). It never leaves your machine unless you run `rappi auth push-railway`.
+
+Browser login also captures Rappi's **refresh token**, so the 7-day access token renews itself automatically — see [Auth runbook](#auth-runbook).
 
 ### Connect to Your AI Platform
 
@@ -247,7 +249,7 @@ uv run rappi prefs set embeddings.enabled true
 
 **Account**
 - `get_ordering_context` — full state snapshot (user, address, cart, memory)
-- `auth_status` — profile and Prime status
+- `auth_status` — profile, Prime status, `token_expires_at` and `auto_refresh` (no token values)
 - `list_delivery_addresses` / `set_delivery_address(address_id)`
 - `get_credits_balance` — Rappi credits/wallet balance
 - `get_rappi_favorites` — favorite stores from Rappi
@@ -282,10 +284,12 @@ uv run rappi prefs                 # Your preferences
 | Command | Description |
 |---------|-------------|
 | `rappi go` | Interactive ordering session |
-| `rappi auth login` | Authenticate (browser or manual token) |
-| `rappi auth token <token> <device_id>` | Set credentials directly (headless) |
-| `rappi auth status` | Show profile and Prime status |
-| `rappi auth logout` | Clear saved token |
+| `rappi auth login` | Authenticate (browser, or `--token` [+ `--refresh-token`]) |
+| `rappi auth token <token> <device_id>` | Set credentials directly (headless, no auto-refresh) |
+| `rappi auth status` | Show profile, Prime status, token expiry and auto-refresh |
+| `rappi auth refresh` | Force one token refresh (prints `ok, expires …` or the error code) |
+| `rappi auth push-railway` | Push the saved token set to the linked Railway service |
+| `rappi auth logout` | Clear saved tokens |
 | `rappi address list` | List delivery addresses |
 | `rappi address set <id>` | Switch active address |
 | `rappi search <query>` | Search restaurants and products |
@@ -324,8 +328,10 @@ Or deploy manually:
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `RAPPI_TOKEN` | `ft.xxxxx` | Auth token from `~/.rappi/config.json` |
-| `RAPPI_DEVICE_ID` | UUID | Device ID from config |
+| `RAPPI_TOKEN` | `ft.xxxxx` | Access token seed (set by `rappi auth push-railway`) |
+| `RAPPI_REFRESH_TOKEN` | `ft.xxxxx` | Refresh token seed — enables auto-refresh (set by `push-railway`) |
+| `RAPPI_DEVICE_ID` | UUID | Device ID (set by `push-railway`) |
+| `RAPPI_CONFIG_DIR` | `/data/rappi` | Where refreshed tokens persist — point at a mounted volume |
 | `MCP_TRANSPORT` | `sse` | Enables HTTP transport |
 | `RAPPI_COUNTRY` | `co` | Country code: `co` (Colombia) or `mx` (Mexico) |
 
@@ -334,11 +340,24 @@ Or deploy manually:
 
 Coordinates are auto-synced from your Rappi active address — no need to set lat/lng.
 
-**Get your token and device ID:**
-```bash
-uv run rappi auth login                    # Authenticate first
-cat ~/.rappi/config.json | python3 -c "import json,sys; c=json.load(sys.stdin); print(f'RAPPI_TOKEN={c[\"token\"]}\nRAPPI_DEVICE_ID={c[\"device_id\"]}')"
-```
+**Set the tokens:** follow the [Auth runbook](#auth-runbook). `rappi auth push-railway` sets all three token variables and never prints them.
+
+### Auth runbook
+
+**How auto-refresh works.** Rappi access tokens expire after exactly 7 days. Each login also returns a refresh token, which the plugin saves next to the access token. The client refreshes the token before any request when expiry is less than 48 h away or unknown. It also refreshes when an API call returns 401, then retries that call once. On Railway, a keep-alive task checks every 6 h, so the token renews even when nobody is ordering. The refreshed tokens are written atomically to `$RAPPI_CONFIG_DIR/config.json` and survive restarts because that directory lives on a volume.
+
+**Env seed vs. volume.** `RAPPI_TOKEN` and `RAPPI_REFRESH_TOKEN` are only *seeds*. The volume file records a fingerprint of the seed it came from. If the seed is unchanged, the file wins, since it holds the newer refreshed tokens. If `push-railway` pushed a new seed, the env wins and re-seeds the file. With only the legacy `RAPPI_TOKEN` set, behavior is unchanged and there is no auto-refresh.
+
+**One-time Railway setup** (service `rappi-claude-plugin`):
+
+1. Attach a volume to `rappi-claude-plugin` mounted at `/data`.
+2. Set `RAPPI_CONFIG_DIR=/data/rappi`.
+3. Locally, in `~/Projects/"Rappi Claude Plugin"`, run `uv run rappi auth login` (phone + OTP), then `uv run rappi auth push-railway`. The second command needs the Railway CLI linked to this project.
+4. Confirm that the MCP `auth_status` tool shows `auto_refresh: true` and a `token_expires_at` about 7 days out.
+
+**When a tool still says "Token expired…"**, the refresh itself failed. Re-run step 3 (`uv run rappi auth login`, then `uv run rappi auth push-railway`). Locally, `uv run rappi auth refresh` shows the refresh error code, and `uv run rappi auth status` shows `Expires` and `Auto-refresh`.
+
+**What still needs a human:** the refresh token eventually expires too. Its lifetime is unknown, likely at least 3 months. Rappi can also revoke it at any time, for example after a password change, a logout on all devices, or a security reset. When that happens, repeat step 3.
 
 ### Plugin Builds
 
@@ -361,8 +380,8 @@ For OpenClaw: `openclaw plugins install ~/Desktop/rappi-openclaw-plugin.zip && o
 
 - **Orders require explicit confirmation** — the AI always previews first and asks before placing
 - **Spending limit** — orders over $500,000 COP are blocked by default. Change with `rappi prefs set max_order_amount 1000000`
-- **Token storage** — saved locally at `~/.rappi/config.json` (never committed to git)
-- **Railway deployment** — your token is stored in Railway's env vars. Use Railway's secrets management
+- **Token storage** — access and refresh tokens are saved locally at `~/.rappi/config.json` with mode `0600`, and never committed to git. Tokens are never printed or logged: `auth status`, `auth refresh` and `push-railway` show only expiry and success/failure
+- **Railway deployment** — the token seeds live in Railway's env vars and the refreshed tokens live on the service volume. Use Railway's secrets management
 - **No password access** — the plugin only captures the Bearer token, not your Rappi password
 
 ## How the API Was Mapped
